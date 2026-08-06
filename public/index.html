@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Голосовой ассистент</title>
+<style>
+  :root {
+    --ink: #10100e;
+    --paper: #e8e4da;
+    --muted: #6f6a5e;
+    --line: #c9c3b5;
+    --live: #2f6f4f;
+    --alert: #9c3722;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.55 ui-sans-serif, system-ui, sans-serif;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+
+  main {
+    width: min(620px, 100%);
+    display: grid;
+    gap: 24px;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .status::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--line);
+  }
+  .status[data-state="live"]::before,
+  .status[data-state="speaking"]::before { background: var(--live); }
+  .status[data-state="error"]::before { background: var(--alert); }
+  .status[data-state="pending"]::before {
+    background: var(--muted);
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+
+  .meter {
+    height: 2px;
+    background: var(--ink);
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 70ms linear;
+  }
+  .meter-track { height: 2px; background: var(--line); }
+
+  .log {
+    min-height: 260px;
+    max-height: 50vh;
+    overflow-y: auto;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    padding: 18px 0;
+    display: grid;
+    gap: 14px;
+    align-content: start;
+  }
+  .log:empty::before {
+    content: "Нажмите «Начать разговор» и говорите.";
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .line { margin: 0; }
+  .who {
+    display: block;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 3px;
+  }
+  .line--user { color: var(--muted); }
+
+  .setup {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+  .setup label {
+    display: grid;
+    gap: 5px;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .setup select {
+    font: inherit;
+    font-size: 14px;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--ink);
+    background: none;
+    border: 1px solid var(--line);
+    padding: 8px 10px;
+    min-width: 160px;
+  }
+  .setup select:disabled { opacity: 0.4; }
+  .setup select:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
+
+  .controls { display: flex; gap: 10px; }
+
+  button {
+    font: inherit;
+    padding: 11px 20px;
+    border: 1px solid var(--ink);
+    background: var(--ink);
+    color: var(--paper);
+    cursor: pointer;
+  }
+  button:last-child { background: none; color: var(--ink); }
+  button:disabled { opacity: 0.3; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--live); outline-offset: 3px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Голосовой ассистент</h1>
+    <p class="status" id="status" data-state="idle">Готов к разговору</p>
+  </header>
+
+  <div class="meter-track"><div class="meter" id="meter"></div></div>
+
+  <div class="log" id="log"></div>
+
+  <div class="setup">
+    <label>Голос
+      <select id="voice"></select>
+    </label>
+    <label>Характер
+      <select id="character"></select>
+    </label>
+  </div>
+
+  <div class="controls">
+    <button id="start">Начать разговор</button>
+    <button id="stop" disabled>Завершить</button>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
