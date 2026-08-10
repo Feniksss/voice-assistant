@@ -3,9 +3,11 @@ const stopBtn = document.getElementById("stop");
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
 const meterEl = document.getElementById("meter");
+const providerEl = document.getElementById("provider");
 const voiceEl = document.getElementById("voice");
 const characterEl = document.getElementById("character");
 
+let config = null; // ответ /config: списки провайдеров и голосов
 let pc = null;
 let dc = null;
 let micStream = null;
@@ -32,18 +34,37 @@ function addLine(who, text) {
   return el;
 }
 
-// Подтягиваем списки голосов и характеров с сервера — единый источник,
-// чтобы не дублировать их в браузере.
+// Подтягиваем с сервера список провайдеров, голосов и характеров —
+// единый источник, чтобы не дублировать их в браузере.
 async function loadConfig() {
   try {
     // Относительный путь (без ведущего "/"), чтобы работать и в корне,
     // и под подпутём вроде /voice/ за общим доменом.
-    const cfg = await (await fetch("config")).json();
-    fillSelect(voiceEl, cfg.voices.map((v) => ({ value: v, label: v })), cfg.defaults.voice);
-    fillSelect(characterEl, cfg.characters.map((c) => ({ value: c.key, label: c.label })), cfg.defaults.character);
+    config = await (await fetch("config")).json();
+
+    // Движки: недоступные (без ключей на сервере) показываем выключенными.
+    providerEl.replaceChildren();
+    for (const p of config.providers) {
+      const opt = document.createElement("option");
+      opt.value = p.key;
+      opt.textContent = p.enabled ? p.label : `${p.label} (не настроен)`;
+      opt.disabled = !p.enabled;
+      if (p.key === config.defaultProvider && p.enabled) opt.selected = true;
+      providerEl.append(opt);
+    }
+    // Характеры общие для обоих движков.
+    fillSelect(characterEl, config.characters.map((c) => ({ value: c.key, label: c.label })), config.defaults.character);
+    applyProvider();
   } catch {
     // Сервер недоступен — оставляем пустые списки, старт всё равно возможен
   }
+}
+
+// Список голосов зависит от выбранного движка.
+function applyProvider() {
+  if (!config) return;
+  const prov = config[providerEl.value];
+  if (prov) fillSelect(voiceEl, prov.voices.map((v) => ({ value: v, label: v })), prov.defaultVoice);
 }
 
 function fillSelect(el, options, selected) {
@@ -57,12 +78,33 @@ function fillSelect(el, options, selected) {
   }
 }
 
+// Общий вход: блокируем управление, дальше зовём нужный движок.
 async function start() {
   startBtn.disabled = true;
-  voiceEl.disabled = characterEl.disabled = true;
+  providerEl.disabled = voiceEl.disabled = characterEl.disabled = true;
   setStatus("Соединяюсь", "pending");
 
   try {
+    if (providerEl.value === "yandex") await connectYandex();
+    else await connectOpenAI();
+    stopBtn.disabled = false;
+  } catch (err) {
+    setStatus("Не удалось соединиться", "error");
+    addLine("assistant", String(err.message || err));
+    startBtn.disabled = false;
+    providerEl.disabled = voiceEl.disabled = characterEl.disabled = false;
+  }
+}
+
+// Yandex Realtime — WebSocket + LPCM через прокси на нашем сервере.
+// Реализуется отдельным шагом, когда будут endpoint/модель/токен.
+async function connectYandex() {
+  throw new Error("Движок Yandex ещё не подключён — задайте YANDEX_* в .env на сервере.");
+}
+
+// OpenAI Realtime — WebRTC напрямую из браузера по эфемерному ключу.
+async function connectOpenAI() {
+  {
     // 1. Берём короткоживущий ключ у своего сервера, передаём выбранные
     //    голос и характер (сервер проверит их по белому списку)
     const tokenRes = await fetch("session", {
@@ -118,13 +160,6 @@ async function start() {
       type: "answer",
       sdp: await sdpRes.text(),
     });
-
-    stopBtn.disabled = false;
-  } catch (err) {
-    setStatus("Не удалось соединиться", "error");
-    addLine("assistant", String(err.message || err));
-    startBtn.disabled = false;
-    voiceEl.disabled = characterEl.disabled = false;
   }
 }
 
@@ -204,9 +239,10 @@ function stop() {
   setStatus("Разговор завершён", "idle");
   startBtn.disabled = false;
   stopBtn.disabled = true;
-  voiceEl.disabled = characterEl.disabled = false;
+  providerEl.disabled = voiceEl.disabled = characterEl.disabled = false;
 }
 
 startBtn.addEventListener("click", start);
 stopBtn.addEventListener("click", stop);
+providerEl.addEventListener("change", applyProvider); // сменили движок — обновить список голосов
 loadConfig();

@@ -1,14 +1,10 @@
 import express from "express";
 import "dotenv/config";
 
-if (!process.env.OPENAI_API_KEY) {
-  console.error("Нет OPENAI_API_KEY в .env — скопируйте .env.example в .env и впишите ключ.");
-  process.exit(1);
-}
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ─────────────────────────── OpenAI Realtime ───────────────────────────
 // Всё, что ниже, можно переопределить через .env, не залезая в код.
 const MODEL = process.env.REALTIME_MODEL || "gpt-realtime-2";
 const TRANSCRIBE_MODEL = process.env.REALTIME_TRANSCRIBE_MODEL || "gpt-realtime-whisper";
@@ -18,10 +14,37 @@ const EAGERNESS = process.env.REALTIME_EAGERNESS || "low";
 const SPEED = Number(process.env.REALTIME_SPEED || "0.95");
 const MAX_OUTPUT_TOKENS = Number(process.env.REALTIME_MAX_OUTPUT_TOKENS || "400");
 
-// Разрешённые голоса. Из этого же списка страница строит выпадающий список,
-// и по нему же проверяется значение, пришедшее от браузера.
+// Разрешённые голоса OpenAI. Из этого же списка страница строит выпадающий
+// список, и по нему же проверяется значение, пришедшее от браузера.
 const VOICES = ["marin", "cedar", "verse", "alloy", "ash", "ballad", "coral", "sage", "echo", "shimmer"];
 
+const OPENAI_ENABLED = Boolean(process.env.OPENAI_API_KEY);
+
+// ─────────────────────────── Yandex Realtime ───────────────────────────
+// Транспорт — WebSocket + LPCM, авторизация по IAM-токену (Bearer).
+// Значения берём из .env; провайдер включается, когда заданы endpoint,
+// модель и источник токена. Сам WS-прокси добавляется отдельным шагом.
+const YANDEX = {
+  url: process.env.YANDEX_REALTIME_URL || "", // wss://… из доки AI Studio
+  model: process.env.YANDEX_REALTIME_MODEL || "", // id realtime-модели
+  folderId: process.env.YANDEX_FOLDER_ID || "",
+  tokenUrl: process.env.YANDEX_TOKEN_URL || "", // наш token-service, отдающий IAM-токен
+  voices: (process.env.YANDEX_VOICES || "alena,jane,omazh,zahar,ermil,filipp")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+  defaultVoice: process.env.YANDEX_VOICE || "alena",
+};
+const YANDEX_ENABLED = Boolean(YANDEX.url && YANDEX.model && (YANDEX.tokenUrl || process.env.YANDEX_IAM_TOKEN));
+
+const DEFAULT_PROVIDER = process.env.DEFAULT_PROVIDER || (OPENAI_ENABLED ? "openai" : "yandex");
+
+if (!OPENAI_ENABLED && !YANDEX_ENABLED) {
+  console.error("Не настроен ни один провайдер: впишите OPENAI_API_KEY или задайте YANDEX_* в .env.");
+  process.exit(1);
+}
+
+// ───────────────────────────── Промпты ─────────────────────────────────
 // Общая часть промпта — именно она сильнее всего влияет на «живость» речи.
 const BASE = `
 Ты — голосовой собеседник. Общайся по-русски, если человек не перешёл на другой язык.
@@ -40,7 +63,7 @@ const BASE = `
 Если тебя перебили — сразу замолкай и слушай, не договаривай начатое.
 `.trim();
 
-// Пресеты характера. Ключ приходит из выпадающего списка на странице.
+// Пресеты характера — общие для обоих провайдеров (это просто системный промпт).
 const CHARACTERS = {
   alive: {
     label: "Живой собеседник",
@@ -60,19 +83,26 @@ const DEFAULT_CHARACTER = "alive";
 app.use(express.static("public"));
 app.use(express.json());
 
-// Единый источник списков для интерфейса — чтобы не дублировать их в браузере.
+// Единый источник для интерфейса: какие провайдеры доступны и их списки.
 app.get("/config", (_req, res) => {
   res.json({
-    voices: VOICES,
+    providers: [
+      { key: "openai", label: "OpenAI Realtime", enabled: OPENAI_ENABLED },
+      { key: "yandex", label: "Yandex Realtime", enabled: YANDEX_ENABLED },
+    ],
+    defaultProvider: DEFAULT_PROVIDER,
+    // Характеры общие — это системный промпт, он одинаково применим к обоим.
     characters: Object.entries(CHARACTERS).map(([key, c]) => ({ key, label: c.label })),
-    defaults: { voice: DEFAULT_VOICE, character: DEFAULT_CHARACTER },
+    defaults: { character: DEFAULT_CHARACTER },
+    openai: { voices: VOICES, defaultVoice: DEFAULT_VOICE },
+    yandex: { voices: YANDEX.voices, defaultVoice: YANDEX.defaultVoice },
   });
 });
 
 /**
  * Простой лимит на выдачу сессий: без него любой, кто открыл хост,
- * может дёргать /session и жечь квоту OpenAI. Держим окно в памяти
- * по IP — для одного инстанса этого достаточно.
+ * может дёргать /session и жечь квоту. Держим окно в памяти по IP —
+ * для одного инстанса этого достаточно.
  */
 const RATE_LIMIT = 10; // запросов
 const RATE_WINDOW_MS = 60_000; // за минуту
@@ -90,13 +120,14 @@ function rateLimited(ip) {
 }
 
 /**
- * Браузеру нельзя давать настоящий API-ключ.
- * Сервер меняет свой постоянный ключ на короткоживущий client_secret,
- * с которым браузер уже сам соединяется с OpenAI напрямую.
- * Голос и характер приходят из выпадающих списков на странице —
- * значения проверяем по белым спискам, чужое не пропускаем.
+ * OpenAI: браузеру нельзя давать настоящий API-ключ. Сервер меняет свой
+ * постоянный ключ на короткоживущий client_secret, с которым браузер уже
+ * сам соединяется с OpenAI напрямую по WebRTC. Голос и характер приходят
+ * из выпадающих списков — проверяем их по белым спискам.
  */
 app.post("/session", async (req, res) => {
+  if (!OPENAI_ENABLED) return res.status(404).json({ error: "Провайдер OpenAI не настроен." });
+
   const ip = req.headers["x-forwarded-for"]?.split(",")[0].trim() || req.socket.remoteAddress;
   if (rateLimited(ip)) {
     return res.status(429).json({ error: "Слишком много запросов, попробуйте через минуту." });
@@ -153,6 +184,17 @@ app.post("/session", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+// ─────────────────────────── Yandex WS-прокси ──────────────────────────
+// TODO: браузер ⇄ (WS) наш сервер ⇄ (WS + Bearer IAM) Yandex Realtime.
+// Нужны из доки/операций: точный wss-endpoint (YANDEX_REALTIME_URL),
+// id realtime-модели (YANDEX_REALTIME_MODEL) и IAM-токен от token-service
+// (YANDEX_TOKEN_URL). Проксирует JSON-события и LPCM-аудио в обе стороны.
+
+const server = app.listen(PORT, () => {
   console.log(`Открой http://localhost:${PORT}`);
+  console.log(
+    `Провайдеры: OpenAI=${OPENAI_ENABLED ? "on" : "off"}, Yandex=${YANDEX_ENABLED ? "on" : "off"}; по умолчанию — ${DEFAULT_PROVIDER}`,
+  );
 });
+
+export { server };
