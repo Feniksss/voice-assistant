@@ -14,6 +14,7 @@ let micStream = null;
 let audioCtx = null;
 let rafId = null;
 let audioEl = null;
+let yandex = null; // состояние Yandex-сессии: { ws, micNode, playNode, queue, ... }
 
 function setStatus(text, state) {
   statusEl.textContent = text;
@@ -97,9 +98,150 @@ async function start() {
 }
 
 // Yandex Realtime — WebSocket + LPCM через прокси на нашем сервере.
-// Реализуется отдельным шагом, когда будут endpoint/модель/токен.
+// Прокси держит API-ключ и общается с Яндексом; браузер шлёт/принимает PCM.
 async function connectYandex() {
-  throw new Error("Движок Yandex ещё не подключён — задайте YANDEX_* в .env на сервере.");
+  // WS к нашему прокси. Путь относительный ("rt"), поэтому работает и в корне,
+  // и под /voice/; http→ws, https→wss.
+  const wsUrl = new URL("rt", location.href);
+  wsUrl.protocol = wsUrl.protocol.replace("http", "ws");
+  wsUrl.searchParams.set("voice", voiceEl.value);
+  wsUrl.searchParams.set("character", characterEl.value);
+
+  const ws = new WebSocket(wsUrl);
+  yandex = { ws, queue: [], readOffset: 0, epoch: 0, curEpoch: null, assistantLine: null };
+
+  // Ждём открытия и параметров аудио (событие proxy.ready с частотой).
+  const rate = await new Promise((resolve, reject) => {
+    ws.addEventListener("error", () => reject(new Error("WebSocket к серверу не открылся")), { once: true });
+    ws.addEventListener("close", () => reject(new Error("Сервер закрыл соединение")), { once: true });
+    ws.addEventListener("message", (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "proxy.ready") resolve(msg.outRate || 44100);
+      else handleYandexEvent(msg);
+    });
+  });
+
+  // Аудиоконтекст на частоте сервера (вход = выход), микрофон, захват и воспроизведение.
+  audioCtx = new AudioContext({ sampleRate: rate });
+  await audioCtx.resume().catch(() => {}); // на случай автоплей-политики браузера
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  const source = audioCtx.createMediaStreamSource(micStream);
+
+  // Захват микрофона в PCM16 и отправка на прокси. ScriptProcessor устарел,
+  // но работает везде и не требует отдельного worklet-файла (важно под /voice/).
+  yandex.micNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  yandex.micNode.onaudioprocess = (e) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const f32 = e.inputBuffer.getChannelData(0);
+    const pcm = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++) {
+      const s = Math.max(-1, Math.min(1, f32[i]));
+      pcm[i] = s < 0 ? s * 32768 : s * 32767;
+    }
+    ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: bufToB64(pcm.buffer) }));
+  };
+  source.connect(yandex.micNode);
+  yandex.micNode.connect(audioCtx.destination); // нужно, чтобы onaudioprocess срабатывал; выход молчит
+
+  // Воспроизведение ответа: тянем PCM из очереди. Пусто — тишина.
+  yandex.playNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  yandex.playNode.onaudioprocess = (e) => {
+    const out = e.outputBuffer.getChannelData(0);
+    let i = 0;
+    while (i < out.length && yandex.queue.length) {
+      const chunk = yandex.queue[0];
+      const n = Math.min(chunk.length - yandex.readOffset, out.length - i);
+      out.set(chunk.subarray(yandex.readOffset, yandex.readOffset + n), i);
+      i += n;
+      yandex.readOffset += n;
+      if (yandex.readOffset >= chunk.length) {
+        yandex.queue.shift();
+        yandex.readOffset = 0;
+      }
+    }
+    for (; i < out.length; i++) out[i] = 0;
+  };
+  yandex.playNode.connect(audioCtx.destination);
+
+  // Если сервер закроет соединение уже во время разговора — аккуратно завершаем.
+  ws.addEventListener("close", () => {
+    if (yandex) {
+      setStatus("Соединение закрыто", "idle");
+      stop();
+    }
+  });
+
+  drawMeter(micStream, audioCtx);
+  setStatus("Слушаю", "live");
+}
+
+// Декод base64-PCM16 → Float32 и постановка в очередь воспроизведения.
+function enqueuePcm(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer, 0, bytes.length >> 1);
+  const f32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
+  yandex.queue.push(f32);
+}
+
+function bufToB64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+// События Yandex Realtime (имена совместимы с OpenAI Realtime).
+function handleYandexEvent(msg) {
+  switch (msg.type) {
+    case "session.created":
+      setStatus("Слушаю", "live");
+      break;
+
+    case "conversation.item.input_audio_transcription.completed":
+      if (msg.transcript) addLine("user", msg.transcript);
+      break;
+
+    case "response.created":
+      // Новый ответ — своя «эпоха»; дельзы прошлой, прерванной, игнорируем.
+      yandex.curEpoch = yandex.epoch;
+      yandex.assistantLine = null;
+      break;
+
+    case "response.output_text.delta":
+      if (msg.delta) {
+        if (!yandex.assistantLine) yandex.assistantLine = addLine("assistant", "");
+        yandex.assistantLine.append(msg.delta);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      setStatus("Говорит", "speaking");
+      break;
+
+    case "response.output_audio.delta":
+      // Играем только аудио текущего ответа (эпоха совпадает).
+      if (yandex.curEpoch === yandex.epoch && msg.delta) enqueuePcm(msg.delta);
+      setStatus("Говорит", "speaking");
+      break;
+
+    // Пользователь начал говорить поверх ответа — обрываем воспроизведение
+    // (чистим очередь) и меняем эпоху, чтобы хвост прошлого ответа не доиграл.
+    case "input_audio_buffer.speech_started":
+      yandex.epoch += 1;
+      yandex.curEpoch = null;
+      yandex.queue = [];
+      yandex.readOffset = 0;
+      setStatus("Слушаю", "live");
+      break;
+
+    case "error":
+      setStatus("Ошибка", "error");
+      addLine("assistant", msg.error?.message ?? "неизвестная ошибка");
+      break;
+  }
 }
 
 // OpenAI Realtime — WebRTC напрямую из браузера по эфемерному ключу.
@@ -207,9 +349,10 @@ function appendDelta(who, id, delta) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// Индикатор громкости — видно, что микрофон реально слышит
-function drawMeter(stream) {
-  audioCtx = new AudioContext();
+// Индикатор громкости — видно, что микрофон реально слышит.
+// ctx можно передать (Yandex использует общий контекст), иначе создаём свой.
+function drawMeter(stream, ctx) {
+  audioCtx = ctx || new AudioContext();
   const source = audioCtx.createMediaStreamSource(stream);
   const analyser = audioCtx.createAnalyser();
   analyser.fftSize = 512;
@@ -227,6 +370,14 @@ function drawMeter(stream) {
 }
 
 function stop() {
+  // Yandex-сессию гасим первой и обнуляем, чтобы onclose не зациклил stop().
+  if (yandex) {
+    const y = yandex;
+    yandex = null;
+    try { y.ws?.close(); } catch {}
+    try { y.micNode?.disconnect(); } catch {}
+    try { y.playNode?.disconnect(); } catch {}
+  }
   dc?.close();
   pc?.close();
   micStream?.getTracks().forEach((t) => t.stop());

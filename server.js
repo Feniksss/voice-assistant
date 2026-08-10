@@ -1,4 +1,5 @@
 import express from "express";
+import { WebSocketServer, WebSocket } from "ws";
 import "dotenv/config";
 
 const app = express();
@@ -25,17 +26,20 @@ const OPENAI_ENABLED = Boolean(process.env.OPENAI_API_KEY);
 // Значения берём из .env; провайдер включается, когда заданы endpoint,
 // модель и источник токена. Сам WS-прокси добавляется отдельным шагом.
 const YANDEX = {
-  url: process.env.YANDEX_REALTIME_URL || "", // wss://… из доки AI Studio
-  model: process.env.YANDEX_REALTIME_MODEL || "", // id realtime-модели
+  url: process.env.YANDEX_REALTIME_URL || "wss://ai.api.cloud.yandex.net/v1/realtime",
+  model: process.env.YANDEX_REALTIME_MODEL || "speech-realtime-250923",
   folderId: process.env.YANDEX_FOLDER_ID || "",
-  tokenUrl: process.env.YANDEX_TOKEN_URL || "", // наш token-service, отдающий IAM-токен
-  voices: (process.env.YANDEX_VOICES || "alena,jane,omazh,zahar,ermil,filipp")
+  apiKey: process.env.YANDEX_API_KEY || "", // ключ AI Studio, scope yc.ai.foundationModels.execute
+  // Частоты дискретизации PCM (вход = выход в текущем клиенте). 44100 — как в примере Яндекса.
+  inRate: Number(process.env.YANDEX_IN_RATE || "44100"),
+  outRate: Number(process.env.YANDEX_OUT_RATE || "44100"),
+  voices: (process.env.YANDEX_VOICES || "dasha,julia,lera,marina,alexander,kirill,anton,alena,jane,omazh,zahar,ermil,filipp")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
-  defaultVoice: process.env.YANDEX_VOICE || "alena",
+  defaultVoice: process.env.YANDEX_VOICE || "dasha",
 };
-const YANDEX_ENABLED = Boolean(YANDEX.url && YANDEX.model && (YANDEX.tokenUrl || process.env.YANDEX_IAM_TOKEN));
+const YANDEX_ENABLED = Boolean(YANDEX.apiKey && YANDEX.folderId);
 
 const DEFAULT_PROVIDER = process.env.DEFAULT_PROVIDER || (OPENAI_ENABLED ? "openai" : "yandex");
 
@@ -184,17 +188,97 @@ app.post("/session", async (req, res) => {
   }
 });
 
-// ─────────────────────────── Yandex WS-прокси ──────────────────────────
-// TODO: браузер ⇄ (WS) наш сервер ⇄ (WS + Bearer IAM) Yandex Realtime.
-// Нужны из доки/операций: точный wss-endpoint (YANDEX_REALTIME_URL),
-// id realtime-модели (YANDEX_REALTIME_MODEL) и IAM-токен от token-service
-// (YANDEX_TOKEN_URL). Проксирует JSON-события и LPCM-аудио в обе стороны.
-
 const server = app.listen(PORT, () => {
   console.log(`Открой http://localhost:${PORT}`);
   console.log(
     `Провайдеры: OpenAI=${OPENAI_ENABLED ? "on" : "off"}, Yandex=${YANDEX_ENABLED ? "on" : "off"}; по умолчанию — ${DEFAULT_PROVIDER}`,
   );
 });
+
+// ─────────────────────────── Yandex WS-прокси ──────────────────────────
+// Браузер ⇄ (WS) наш сервер ⇄ (WS + Api-Key) Yandex Realtime.
+// API-ключ живёт только здесь; браузеру не отдаём. Наружу от клиента
+// пропускаем лишь аудио, чтобы нельзя было переопределить промпт/голос.
+if (YANDEX_ENABLED) {
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on("upgrade", (req, socket, head) => {
+    const { pathname } = new URL(req.url, "http://localhost");
+    if (pathname !== "/rt") return socket.destroy(); // не наш путь
+
+    const ip = req.headers["x-forwarded-for"]?.split(",")[0].trim() || req.socket.remoteAddress;
+    if (rateLimited(ip)) return socket.destroy();
+
+    wss.handleUpgrade(req, socket, head, (client) => wss.emit("connection", client, req));
+  });
+
+  wss.on("connection", (client, req) => {
+    const params = new URL(req.url, "http://localhost").searchParams;
+    const voice = YANDEX.voices.includes(params.get("voice")) ? params.get("voice") : YANDEX.defaultVoice;
+    const character = CHARACTERS[params.get("character")] ?? CHARACTERS[DEFAULT_CHARACTER];
+
+    const upstream = new WebSocket(`${YANDEX.url}?model=gpt://${YANDEX.folderId}/${YANDEX.model}`, {
+      headers: { Authorization: `Api-Key ${YANDEX.apiKey}` },
+    });
+
+    upstream.on("open", () => {
+      // Конфигурация сессии задаётся на сервере — промпт и голос под контролем.
+      upstream.send(
+        JSON.stringify({
+          type: "session.update",
+          session: {
+            instructions: character.instructions,
+            output_modalities: ["audio"],
+            audio: {
+              input: {
+                format: { type: "audio/pcm", rate: YANDEX.inRate },
+                turn_detection: { type: "server_vad", threshold: 0.5, silence_duration_ms: 400 },
+              },
+              output: {
+                format: { type: "audio/pcm", rate: YANDEX.outRate },
+                voice,
+              },
+            },
+          },
+        }),
+      );
+      // Сообщаем браузеру частоты, чтобы он захватывал/играл PCM правильно.
+      client.send(JSON.stringify({ type: "proxy.ready", inRate: YANDEX.inRate, outRate: YANDEX.outRate }));
+    });
+
+    // upstream → браузер: события как есть (транскрипты, аудио-дельты, ошибки).
+    upstream.on("message", (data) => {
+      if (client.readyState === WebSocket.OPEN) client.send(data.toString());
+    });
+    upstream.on("close", () => client.close());
+    upstream.on("error", (e) => {
+      try {
+        client.send(JSON.stringify({ type: "error", error: { message: `upstream: ${e.message}` } }));
+      } catch {}
+      client.close();
+    });
+
+    // браузер → upstream: пропускаем только аудио.
+    client.on("message", (data) => {
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      if (msg.type === "input_audio_buffer.append" && upstream.readyState === WebSocket.OPEN) {
+        upstream.send(data.toString());
+      }
+    });
+    client.on("close", () => {
+      if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
+    });
+    client.on("error", () => {
+      try {
+        upstream.close();
+      } catch {}
+    });
+  });
+}
 
 export { server };
