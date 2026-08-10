@@ -36,7 +36,9 @@ function addLine(who, text) {
 // чтобы не дублировать их в браузере.
 async function loadConfig() {
   try {
-    const cfg = await (await fetch("/config")).json();
+    // Относительный путь (без ведущего "/"), чтобы работать и в корне,
+    // и под подпутём вроде /voice/ за общим доменом.
+    const cfg = await (await fetch("config")).json();
     fillSelect(voiceEl, cfg.voices.map((v) => ({ value: v, label: v })), cfg.defaults.voice);
     fillSelect(characterEl, cfg.characters.map((c) => ({ value: c.key, label: c.label })), cfg.defaults.character);
   } catch {
@@ -63,7 +65,7 @@ async function start() {
   try {
     // 1. Берём короткоживущий ключ у своего сервера, передаём выбранные
     //    голос и характер (сервер проверит их по белому списку)
-    const tokenRes = await fetch("/session", {
+    const tokenRes = await fetch("session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ voice: voiceEl.value, character: characterEl.value }),
