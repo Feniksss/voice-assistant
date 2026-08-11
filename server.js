@@ -46,6 +46,12 @@ const YANDEX = {
     .filter(Boolean),
   defaultRole: process.env.YANDEX_ROLE || "good",
   speed: Number(process.env.YANDEX_SPEED || "1.0"),
+  // Серверный VAD: сколько миллисекунд тишины ждать, прежде чем счесть,
+  // что человек договорил. Больше — терпеливее, не обрывает паузы в речи
+  // (ценой чуть более поздней реакции после реального конца фразы).
+  vadSilenceMs: Number(process.env.YANDEX_VAD_SILENCE_MS || "800"),
+  // Порог чувствительности к речи (0..1). Ниже — чутче к тихой речи.
+  vadThreshold: Number(process.env.YANDEX_VAD_THRESHOLD || "0.5"),
 };
 const YANDEX_ENABLED = Boolean(YANDEX.apiKey && YANDEX.folderId);
 
@@ -246,7 +252,11 @@ if (YANDEX_ENABLED) {
             audio: {
               input: {
                 format: { type: "audio/pcm", rate: YANDEX.inRate },
-                turn_detection: { type: "server_vad", threshold: 0.5, silence_duration_ms: 400 },
+                turn_detection: {
+                  type: "server_vad",
+                  threshold: YANDEX.vadThreshold,
+                  silence_duration_ms: YANDEX.vadSilenceMs,
+                },
               },
               output: {
                 format: { type: "audio/pcm", rate: YANDEX.outRate },
