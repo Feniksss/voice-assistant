@@ -63,15 +63,21 @@ async function loadConfig() {
   }
 }
 
-// Список голосов зависит от выбранного движка; амплуа — только у Yandex.
+// Список голосов зависит от выбранного движка.
 function applyProvider() {
   if (!config) return;
   const prov = config[providerEl.value];
   if (prov) fillSelect(voiceEl, prov.voices.map((v) => ({ value: v, label: v })), prov.defaultVoice);
+  applyVoiceRoles();
+}
 
-  const hasRoles = Array.isArray(prov?.roles) && prov.roles.length > 0;
-  roleField.hidden = !hasRoles;
-  if (hasRoles) fillSelect(roleEl, prov.roles.map((r) => ({ value: r, label: r })), prov.defaultRole);
+// Амплуа зависит от голоса (у Yandex). Показываем только валидные роли;
+// если у голоса ролей нет — прячем селектор (так не отправим невалидную пару).
+function applyVoiceRoles() {
+  const prov = config?.[providerEl.value];
+  const roles = (prov?.voiceRoles && prov.voiceRoles[voiceEl.value]) || [];
+  roleField.hidden = roles.length === 0;
+  if (roles.length) fillSelect(roleEl, roles.map((r) => ({ value: r, label: r })), roles[0]);
 }
 
 function fillSelect(el, options, selected) {
@@ -111,7 +117,7 @@ async function connectYandex() {
   const wsUrl = new URL("rt", location.href);
   wsUrl.protocol = wsUrl.protocol.replace("http", "ws");
   wsUrl.searchParams.set("voice", voiceEl.value);
-  wsUrl.searchParams.set("role", roleEl.value);
+  if (!roleField.hidden) wsUrl.searchParams.set("role", roleEl.value); // только если голос поддерживает
   wsUrl.searchParams.set("character", characterEl.value);
 
   const ws = new WebSocket(wsUrl);
@@ -403,4 +409,5 @@ function stop() {
 startBtn.addEventListener("click", start);
 stopBtn.addEventListener("click", stop);
 providerEl.addEventListener("change", applyProvider); // сменили движок — обновить список голосов
+voiceEl.addEventListener("change", applyVoiceRoles); // сменили голос — обновить доступные амплуа
 loadConfig();

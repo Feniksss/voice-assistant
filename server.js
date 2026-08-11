@@ -38,14 +38,10 @@ const YANDEX = {
     .map((s) => s.trim())
     .filter(Boolean),
   defaultVoice: process.env.YANDEX_VOICE || "dasha",
-  // Амплуа — эмоциональная подача голоса. Доступность зависит от голоса,
-  // но API принимает любое из списка; неподходящее просто игнорируется.
-  roles: (process.env.YANDEX_ROLES || "neutral,good,evil,friendly,whisper")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
-  defaultRole: process.env.YANDEX_ROLE || "good",
   speed: Number(process.env.YANDEX_SPEED || "1.0"),
+  // Просить модель размечать ударение знаком + (TTS-разметка v3). Управление
+  // ударением синтеза. Отключить: YANDEX_STRESS_MARKS=0.
+  stressMarks: (process.env.YANDEX_STRESS_MARKS ?? "1") !== "0",
   // Серверный VAD: сколько миллисекунд тишины ждать, прежде чем счесть,
   // что человек договорил. Больше — терпеливее, не обрывает паузы в речи
   // (ценой чуть более поздней реакции после реального конца фразы).
@@ -54,6 +50,18 @@ const YANDEX = {
   vadThreshold: Number(process.env.YANDEX_VAD_THRESHOLD || "0.5"),
 };
 const YANDEX_ENABLED = Boolean(YANDEX.apiKey && YANDEX.folderId);
+
+// Какие амплуа поддерживает каждый голос. Важно: невалидная пара голос+амплуа
+// не отклоняется при session.update, но роняет синтез ("Unknown role ... for ...").
+// Голоса, которых здесь нет, используются без амплуа (селектор скрывается).
+// Премиум-голоса уточняются по доке voices — пока без ролей, чтобы не падать.
+const YANDEX_VOICE_ROLES = {
+  jane: ["neutral", "good", "evil"],
+  omazh: ["neutral", "evil"],
+  zahar: ["neutral", "good"],
+  ermil: ["neutral", "good"],
+  alena: ["neutral", "good"],
+};
 
 const DEFAULT_PROVIDER = process.env.DEFAULT_PROVIDER || (OPENAI_ENABLED ? "openai" : "yandex");
 
@@ -116,8 +124,8 @@ app.get("/config", (_req, res) => {
     yandex: {
       voices: YANDEX.voices,
       defaultVoice: YANDEX.defaultVoice,
-      roles: YANDEX.roles,
-      defaultRole: YANDEX.defaultRole,
+      // Амплуа зависит от голоса — страница показывает только валидные.
+      voiceRoles: YANDEX_VOICE_ROLES,
     },
   });
 });
@@ -234,12 +242,20 @@ if (YANDEX_ENABLED) {
   wss.on("connection", (client, req) => {
     const params = new URL(req.url, "http://localhost").searchParams;
     const voice = YANDEX.voices.includes(params.get("voice")) ? params.get("voice") : YANDEX.defaultVoice;
-    const role = YANDEX.roles.includes(params.get("role")) ? params.get("role") : YANDEX.defaultRole;
+    // Амплуа отправляем ТОЛЬКО если оно валидно для выбранного голоса — иначе синтез падает.
+    const allowedRoles = YANDEX_VOICE_ROLES[voice] || [];
+    const role = allowedRoles.includes(params.get("role")) ? params.get("role") : null;
     const character = CHARACTERS[params.get("character")] ?? CHARACTERS[DEFAULT_CHARACTER];
 
     const upstream = new WebSocket(`${YANDEX.url}?model=gpt://${YANDEX.folderId}/${YANDEX.model}`, {
       headers: { Authorization: `Api-Key ${YANDEX.apiKey}` },
     });
+
+    // TTS-разметка ударения: v3 трактует текст как размеченный, поэтому знак +
+    // перед ударной гласной в ответе модели управляет ударением синтеза.
+    const stressHint = YANDEX.stressMarks
+      ? "\n\nПроизношение: если ударение в слове неоднозначно или ты не уверен, как его произнесёт синтезатор, ставь знак + прямо перед ударной гласной в тексте ответа (например: з+амок, звон+ит, кл+ючи, кот+орый, красив+ее). Помечай только такие слова, очевидные не трогай. Сам знак + не произноси."
+      : "";
 
     upstream.on("open", () => {
       // Конфигурация сессии задаётся на сервере — промпт и голос под контролем.
@@ -247,7 +263,7 @@ if (YANDEX_ENABLED) {
         JSON.stringify({
           type: "session.update",
           session: {
-            instructions: character.instructions,
+            instructions: character.instructions + stressHint,
             output_modalities: ["audio"],
             audio: {
               input: {
@@ -261,7 +277,7 @@ if (YANDEX_ENABLED) {
               output: {
                 format: { type: "audio/pcm", rate: YANDEX.outRate },
                 voice,
-                role, // амплуа — эмоциональная подача
+                ...(role ? { role } : {}), // амплуа — только если валидно для голоса
                 speed: YANDEX.speed,
               },
             },
