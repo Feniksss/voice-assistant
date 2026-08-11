@@ -39,6 +39,8 @@ const YANDEX = {
     .filter(Boolean),
   defaultVoice: process.env.YANDEX_VOICE || "dasha",
   speed: Number(process.env.YANDEX_SPEED || "1.0"),
+  // Смещение тембра в Гц [-1000..1000]: выше — звонче/живее, ниже — глубже. 0 — как есть.
+  pitchShift: Number(process.env.YANDEX_PITCH_SHIFT || "0"),
   // Серверный VAD: сколько миллисекунд тишины ждать, прежде чем счесть,
   // что человек договорил. Больше — терпеливее, не обрывает паузы в речи
   // (ценой чуть более поздней реакции после реального конца фразы).
@@ -58,6 +60,9 @@ const YANDEX_VOICE_ROLES = {
   zahar: ["neutral", "good"],
   ermil: ["neutral", "good"],
   alena: ["neutral", "good"],
+  // Проверено синтезом: у marina валидны friendly/neutral/whisper (good/evil — нет).
+  // friendly первым — станет значением по умолчанию (звучит живее).
+  marina: ["friendly", "neutral", "whisper"],
 };
 
 const DEFAULT_PROVIDER = process.env.DEFAULT_PROVIDER || (OPENAI_ENABLED ? "openai" : "yandex");
@@ -275,6 +280,7 @@ if (YANDEX_ENABLED) {
                 format: { type: "audio/pcm", rate: YANDEX.outRate },
                 voice,
                 ...(role ? { role } : {}), // амплуа — только если валидно для голоса
+                ...(YANDEX.pitchShift ? { pitch_shift: YANDEX.pitchShift } : {}),
                 speed: YANDEX.speed,
               },
             },
