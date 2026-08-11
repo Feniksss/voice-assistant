@@ -65,10 +65,24 @@ const YANDEX_VOICE_ROLES = {
   marina: ["friendly", "neutral", "whisper"],
 };
 
-const DEFAULT_PROVIDER = process.env.DEFAULT_PROVIDER || (OPENAI_ENABLED ? "openai" : "yandex");
+// ─────────────────────────── ElevenLabs Agents ─────────────────────────
+// Realtime-агент: браузер подключается по signed URL (ключ остаётся на сервере).
+// GPT остаётся LLM агента; голос/промпт/язык задаём оверрайдами при старте.
+const ELEVEN = {
+  apiKey: process.env.ELEVEN_API_KEY || "",
+  agentId: process.env.ELEVEN_AGENT_ID || "",
+  ttsModel: process.env.ELEVEN_TTS_MODEL || "eleven_turbo_v2_5",
+  language: process.env.ELEVEN_LANGUAGE || "ru",
+  llm: process.env.ELEVEN_LLM || "gpt-4o",
+  defaultVoice: process.env.ELEVEN_VOICE || "",
+};
+const ELEVEN_ENABLED = Boolean(ELEVEN.apiKey && ELEVEN.agentId);
 
-if (!OPENAI_ENABLED && !YANDEX_ENABLED) {
-  console.error("Не настроен ни один провайдер: впишите OPENAI_API_KEY или задайте YANDEX_* в .env.");
+const DEFAULT_PROVIDER =
+  process.env.DEFAULT_PROVIDER || (OPENAI_ENABLED ? "openai" : YANDEX_ENABLED ? "yandex" : "elevenlabs");
+
+if (!OPENAI_ENABLED && !YANDEX_ENABLED && !ELEVEN_ENABLED) {
+  console.error("Не настроен ни один провайдер: OPENAI_API_KEY, YANDEX_* или ELEVEN_* в .env.");
   process.exit(1);
 }
 
@@ -125,6 +139,7 @@ app.get("/config", (_req, res) => {
     providers: [
       { key: "openai", label: "OpenAI Realtime", enabled: OPENAI_ENABLED },
       { key: "yandex", label: "Yandex Realtime", enabled: YANDEX_ENABLED },
+      { key: "elevenlabs", label: "ElevenLabs", enabled: ELEVEN_ENABLED },
     ],
     defaultProvider: DEFAULT_PROVIDER,
     // Характеры общие — это системный промпт, он одинаково применим к обоим.
@@ -140,6 +155,8 @@ app.get("/config", (_req, res) => {
       defaultSpeed: YANDEX.speed,
       defaultPitch: YANDEX.pitchShift,
     },
+    // Голоса ElevenLabs тянутся отдельно (/eleven-voices) — из аккаунта по ключу.
+    elevenlabs: { language: ELEVEN.language, defaultVoice: ELEVEN.defaultVoice },
   });
 });
 
@@ -224,6 +241,46 @@ app.post("/session", async (req, res) => {
     res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: String(err) });
+  }
+});
+
+/**
+ * ElevenLabs: меняем постоянный API-ключ на короткоживущий signed URL для
+ * агента — с ним браузер подключается к ElevenLabs напрямую. Ключ не утекает.
+ */
+app.get("/eleven-session", async (req, res) => {
+  if (!ELEVEN_ENABLED) return res.status(404).json({ error: "Провайдер ElevenLabs не настроен." });
+
+  const ip = req.headers["x-forwarded-for"]?.split(",")[0].trim() || req.socket.remoteAddress;
+  if (rateLimited(ip)) return res.status(429).json({ error: "Слишком много запросов, попробуйте через минуту." });
+
+  try {
+    const r = await fetch(
+      `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(ELEVEN.agentId)}`,
+      { headers: { "xi-api-key": ELEVEN.apiKey } },
+    );
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    const data = await r.json();
+    // Параметры для оверрайдов на клиенте (GPT как LLM, язык, модель синтеза).
+    res.json({ signedUrl: data.signed_url, llm: ELEVEN.llm, language: ELEVEN.language, ttsModel: ELEVEN.ttsModel });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Голоса из аккаунта ElevenLabs — для выпадающего списка (кэшируем).
+let elevenVoicesCache = null;
+app.get("/eleven-voices", async (_req, res) => {
+  if (!ELEVEN_ENABLED) return res.json([]);
+  if (elevenVoicesCache) return res.json(elevenVoicesCache);
+  try {
+    const r = await fetch("https://api.elevenlabs.io/v1/voices", { headers: { "xi-api-key": ELEVEN.apiKey } });
+    if (!r.ok) return res.json([]);
+    const data = await r.json();
+    elevenVoicesCache = (data.voices || []).map((v) => ({ value: v.voice_id, label: v.name }));
+    res.json(elevenVoicesCache);
+  } catch {
+    res.json([]);
   }
 });
 
