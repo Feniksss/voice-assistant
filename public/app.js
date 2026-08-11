@@ -5,6 +5,8 @@ const logEl = document.getElementById("log");
 const meterEl = document.getElementById("meter");
 const providerEl = document.getElementById("provider");
 const voiceEl = document.getElementById("voice");
+const roleEl = document.getElementById("role");
+const roleField = document.getElementById("roleField");
 const characterEl = document.getElementById("character");
 
 let config = null; // ответ /config: списки провайдеров и голосов
@@ -61,11 +63,15 @@ async function loadConfig() {
   }
 }
 
-// Список голосов зависит от выбранного движка.
+// Список голосов зависит от выбранного движка; амплуа — только у Yandex.
 function applyProvider() {
   if (!config) return;
   const prov = config[providerEl.value];
   if (prov) fillSelect(voiceEl, prov.voices.map((v) => ({ value: v, label: v })), prov.defaultVoice);
+
+  const hasRoles = Array.isArray(prov?.roles) && prov.roles.length > 0;
+  roleField.hidden = !hasRoles;
+  if (hasRoles) fillSelect(roleEl, prov.roles.map((r) => ({ value: r, label: r })), prov.defaultRole);
 }
 
 function fillSelect(el, options, selected) {
@@ -82,7 +88,7 @@ function fillSelect(el, options, selected) {
 // Общий вход: блокируем управление, дальше зовём нужный движок.
 async function start() {
   startBtn.disabled = true;
-  providerEl.disabled = voiceEl.disabled = characterEl.disabled = true;
+  providerEl.disabled = voiceEl.disabled = roleEl.disabled = characterEl.disabled = true;
   setStatus("Соединяюсь", "pending");
 
   try {
@@ -93,7 +99,7 @@ async function start() {
     setStatus("Не удалось соединиться", "error");
     addLine("assistant", String(err.message || err));
     startBtn.disabled = false;
-    providerEl.disabled = voiceEl.disabled = characterEl.disabled = false;
+    providerEl.disabled = voiceEl.disabled = roleEl.disabled = characterEl.disabled = false;
   }
 }
 
@@ -105,6 +111,7 @@ async function connectYandex() {
   const wsUrl = new URL("rt", location.href);
   wsUrl.protocol = wsUrl.protocol.replace("http", "ws");
   wsUrl.searchParams.set("voice", voiceEl.value);
+  wsUrl.searchParams.set("role", roleEl.value);
   wsUrl.searchParams.set("character", characterEl.value);
 
   const ws = new WebSocket(wsUrl);
@@ -390,7 +397,7 @@ function stop() {
   setStatus("Разговор завершён", "idle");
   startBtn.disabled = false;
   stopBtn.disabled = true;
-  providerEl.disabled = voiceEl.disabled = characterEl.disabled = false;
+  providerEl.disabled = voiceEl.disabled = roleEl.disabled = characterEl.disabled = false;
 }
 
 startBtn.addEventListener("click", start);

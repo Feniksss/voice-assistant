@@ -38,6 +38,14 @@ const YANDEX = {
     .map((s) => s.trim())
     .filter(Boolean),
   defaultVoice: process.env.YANDEX_VOICE || "dasha",
+  // Амплуа — эмоциональная подача голоса. Доступность зависит от голоса,
+  // но API принимает любое из списка; неподходящее просто игнорируется.
+  roles: (process.env.YANDEX_ROLES || "neutral,good,evil,friendly,whisper")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+  defaultRole: process.env.YANDEX_ROLE || "good",
+  speed: Number(process.env.YANDEX_SPEED || "1.0"),
 };
 const YANDEX_ENABLED = Boolean(YANDEX.apiKey && YANDEX.folderId);
 
@@ -99,7 +107,12 @@ app.get("/config", (_req, res) => {
     characters: Object.entries(CHARACTERS).map(([key, c]) => ({ key, label: c.label })),
     defaults: { character: DEFAULT_CHARACTER },
     openai: { voices: VOICES, defaultVoice: DEFAULT_VOICE },
-    yandex: { voices: YANDEX.voices, defaultVoice: YANDEX.defaultVoice },
+    yandex: {
+      voices: YANDEX.voices,
+      defaultVoice: YANDEX.defaultVoice,
+      roles: YANDEX.roles,
+      defaultRole: YANDEX.defaultRole,
+    },
   });
 });
 
@@ -215,6 +228,7 @@ if (YANDEX_ENABLED) {
   wss.on("connection", (client, req) => {
     const params = new URL(req.url, "http://localhost").searchParams;
     const voice = YANDEX.voices.includes(params.get("voice")) ? params.get("voice") : YANDEX.defaultVoice;
+    const role = YANDEX.roles.includes(params.get("role")) ? params.get("role") : YANDEX.defaultRole;
     const character = CHARACTERS[params.get("character")] ?? CHARACTERS[DEFAULT_CHARACTER];
 
     const upstream = new WebSocket(`${YANDEX.url}?model=gpt://${YANDEX.folderId}/${YANDEX.model}`, {
@@ -237,6 +251,8 @@ if (YANDEX_ENABLED) {
               output: {
                 format: { type: "audio/pcm", rate: YANDEX.outRate },
                 voice,
+                role, // амплуа — эмоциональная подача
+                speed: YANDEX.speed,
               },
             },
           },
