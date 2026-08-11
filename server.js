@@ -37,7 +37,7 @@ const YANDEX = {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
-  defaultVoice: process.env.YANDEX_VOICE || "dasha",
+  defaultVoice: process.env.YANDEX_VOICE || "marina",
   speed: Number(process.env.YANDEX_SPEED || "1.0"),
   // Смещение тембра в Гц [-1000..1000]: выше — звонче/живее, ниже — глубже. 0 — как есть.
   pitchShift: Number(process.env.YANDEX_PITCH_SHIFT || "0"),
