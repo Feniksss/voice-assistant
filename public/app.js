@@ -8,6 +8,12 @@ const voiceEl = document.getElementById("voice");
 const roleEl = document.getElementById("role");
 const roleField = document.getElementById("roleField");
 const characterEl = document.getElementById("character");
+const speedEl = document.getElementById("speed");
+const speedField = document.getElementById("speedField");
+const speedVal = document.getElementById("speedVal");
+const pitchEl = document.getElementById("pitch");
+const pitchField = document.getElementById("pitchField");
+const pitchVal = document.getElementById("pitchVal");
 
 let config = null; // ответ /config: списки провайдеров и голосов
 let pc = null;
@@ -69,6 +75,21 @@ function applyProvider() {
   const prov = config[providerEl.value];
   if (prov) fillSelect(voiceEl, prov.voices.map((v) => ({ value: v, label: v })), prov.defaultVoice);
   applyVoiceRoles();
+
+  // Скорость и тембр — только у Yandex (у OpenAI задаются через .env).
+  const isYandex = providerEl.value === "yandex";
+  speedField.hidden = pitchField.hidden = !isYandex;
+  if (isYandex) {
+    speedEl.value = prov.defaultSpeed ?? 1.0;
+    pitchEl.value = prov.defaultPitch ?? 0;
+    updateSliderLabels();
+  }
+}
+
+// Живые подписи ползунков.
+function updateSliderLabels() {
+  speedVal.textContent = `${Number(speedEl.value).toFixed(2)}×`;
+  pitchVal.textContent = `${pitchEl.value > 0 ? "+" : ""}${pitchEl.value} Гц`;
 }
 
 // Амплуа зависит от голоса (у Yandex). Показываем только валидные роли;
@@ -95,6 +116,7 @@ function fillSelect(el, options, selected) {
 async function start() {
   startBtn.disabled = true;
   providerEl.disabled = voiceEl.disabled = roleEl.disabled = characterEl.disabled = true;
+  speedEl.disabled = pitchEl.disabled = true;
   setStatus("Соединяюсь", "pending");
 
   try {
@@ -106,6 +128,7 @@ async function start() {
     addLine("assistant", String(err.message || err));
     startBtn.disabled = false;
     providerEl.disabled = voiceEl.disabled = roleEl.disabled = characterEl.disabled = false;
+  speedEl.disabled = pitchEl.disabled = false;
   }
 }
 
@@ -119,6 +142,8 @@ async function connectYandex() {
   wsUrl.searchParams.set("voice", voiceEl.value);
   if (!roleField.hidden) wsUrl.searchParams.set("role", roleEl.value); // только если голос поддерживает
   wsUrl.searchParams.set("character", characterEl.value);
+  wsUrl.searchParams.set("speed", speedEl.value);
+  wsUrl.searchParams.set("pitch", pitchEl.value);
 
   const ws = new WebSocket(wsUrl);
   yandex = { ws, queue: [], readOffset: 0, epoch: 0, curEpoch: null, assistantLine: null };
@@ -404,10 +429,13 @@ function stop() {
   startBtn.disabled = false;
   stopBtn.disabled = true;
   providerEl.disabled = voiceEl.disabled = roleEl.disabled = characterEl.disabled = false;
+  speedEl.disabled = pitchEl.disabled = false;
 }
 
 startBtn.addEventListener("click", start);
 stopBtn.addEventListener("click", stop);
 providerEl.addEventListener("change", applyProvider); // сменили движок — обновить список голосов
 voiceEl.addEventListener("change", applyVoiceRoles); // сменили голос — обновить доступные амплуа
+speedEl.addEventListener("input", updateSliderLabels);
+pitchEl.addEventListener("input", updateSliderLabels);
 loadConfig();

@@ -136,6 +136,9 @@ app.get("/config", (_req, res) => {
       defaultVoice: YANDEX.defaultVoice,
       // Амплуа зависит от голоса — страница показывает только валидные.
       voiceRoles: YANDEX_VOICE_ROLES,
+      // Стартовые значения ползунков скорости и тембра.
+      defaultSpeed: YANDEX.speed,
+      defaultPitch: YANDEX.pitchShift,
     },
   });
 });
@@ -254,6 +257,11 @@ if (YANDEX_ENABLED) {
     // Амплуа отправляем ТОЛЬКО если оно валидно для выбранного голоса — иначе синтез падает.
     const allowedRoles = YANDEX_VOICE_ROLES[voice] || [];
     const role = allowedRoles.includes(params.get("role")) ? params.get("role") : null;
+    // Скорость и тембр приходят с ползунков; клампим в разумные пределы, иначе — дефолт.
+    const speedParam = Number(params.get("speed"));
+    const speed = Number.isFinite(speedParam) && speedParam >= 0.5 && speedParam <= 2 ? speedParam : YANDEX.speed;
+    const pitchParam = Number(params.get("pitch"));
+    const pitch = Number.isFinite(pitchParam) && pitchParam >= -1000 && pitchParam <= 1000 ? pitchParam : YANDEX.pitchShift;
 
     const upstream = new WebSocket(`${YANDEX.url}?model=gpt://${YANDEX.folderId}/${YANDEX.model}`, {
       headers: { Authorization: `Api-Key ${YANDEX.apiKey}` },
@@ -280,8 +288,8 @@ if (YANDEX_ENABLED) {
                 format: { type: "audio/pcm", rate: YANDEX.outRate },
                 voice,
                 ...(role ? { role } : {}), // амплуа — только если валидно для голоса
-                ...(YANDEX.pitchShift ? { pitch_shift: YANDEX.pitchShift } : {}),
-                speed: YANDEX.speed,
+                ...(pitch ? { pitch_shift: pitch } : {}),
+                speed,
               },
             },
           },
